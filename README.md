@@ -5,7 +5,7 @@
 
 ## Demo
 
-<video src="agent/docs/demo.mp4" controls width="720"></video>
+![GPT-6 Astra demo](agent/docs/demo.gif)
 
 
 ## 控制历程
