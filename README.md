@@ -1,7 +1,7 @@
 # GPT-6 Astra 控制 R1-A7 自主抓取
 
-用 **GPT-6 Astra** 视觉闭环控制 Unitree R1-A7 **右臂 + Dex1**，完成黄蛋糕 → 蓝盘。  
-策略与门闩在 `agent/`；底层 IK / DDS / 相机复用本仓库遥操栈（见文末）。
+用 **GPT-6 Astra** 视觉闭环控制 Unitree R1-A7 **右臂 + Dex1**，完成抓取任务。  
+策略在 `agent/`；底层 IK / DDS / 相机复用本仓库遥操栈（见文末）。
 
 ## Demo
 
