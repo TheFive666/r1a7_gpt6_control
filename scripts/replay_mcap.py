@@ -299,12 +299,21 @@ class R1A7RealReplay:
         ratio = float(np.clip(ratio, 0.0, 1.0))
         return DEX1_REAL_OPEN + (DEX1_REAL_CLOSE - DEX1_REAL_OPEN) * ratio
 
+    @classmethod
+    def _hand_to_motor_q(cls, value: float) -> float:
+        """Accept both legacy MuJoCo joint values and real Dex1 motor radians."""
+        value = float(value)
+        # Sim/URDF Dex1 joints live near [-0.02, 0.0245]; real motor q is ~[0, 5].
+        if abs(value) <= 0.05:
+            return cls._sim_to_real(value)
+        return float(np.clip(value, DEX1_REAL_CLOSE, DEX1_REAL_OPEN))
+
     def command(self, q: np.ndarray, hand: np.ndarray) -> None:
         arms = q[4:18]
         with self.arm.lock:
             self.arm.target_q[:14] = arms
-        self.left_message.cmds[0].q = self._sim_to_real(hand[0])
-        self.right_message.cmds[0].q = self._sim_to_real(hand[2])
+        self.left_message.cmds[0].q = self._hand_to_motor_q(hand[0])
+        self.right_message.cmds[0].q = self._hand_to_motor_q(hand[2])
         self.left_publisher.Write(self.left_message)
         self.right_publisher.Write(self.right_message)
 

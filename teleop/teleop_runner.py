@@ -42,6 +42,8 @@ from robot.arm_control import create_arm_controller
 from robot.config import (
     BRAINCO_CMD_MAX,
     BRAINCO_THUMB_AUX_OPEN,
+    DEX1_REAL_CLOSE,
+    DEX1_REAL_OPEN,
     DEX1_SIM_CLOSE,
     DEX1_SIM_OPEN,
     DEX1_SIM_SPEED,
@@ -147,14 +149,16 @@ class TeleopRunner:
         # read them without translation. ``body`` is [waist, vx, vy, vz]; this
         # project never drives a mobile base, so vx/vy/vz are raw joystick
         # values -- archived, never sent.
+        # Dex1 ``pc``/``pt`` gripper values are real motor radians from DDS;
+        # filled after ``hand_ctrl`` is created below.
         self.pc = {
             "arms": np.zeros(14, dtype=float),
-            "gripper": self.gripper_cmd.copy(),
+            "gripper": np.zeros(self.eef_dof * 2, dtype=float),
             "body": np.zeros(4, dtype=float),
         }
         self.pt = {
             "arms": np.zeros(14, dtype=float),
-            "gripper": self.gripper_cmd.copy(),
+            "gripper": np.zeros(self.eef_dof * 2, dtype=float),
             "body": np.zeros(4, dtype=float),
         }
         self.state_lock = threading.Lock()
@@ -189,6 +193,13 @@ class TeleopRunner:
                 f"Real-hand bridge for {self.eef!r} is not wired up in this project; "
                 "running arm teleop with correctly shaped commands only."
             )
+
+        initial_gripper = self._gripper_cmd_for_record(
+            self.gripper_cmd[: self.eef_dof],
+            self.gripper_cmd[self.eef_dof :],
+        )
+        self.pc["gripper"] = initial_gripper.copy()
+        self.pt["gripper"] = initial_gripper.copy()
 
         if start_threads:
             self.start_update_state()
@@ -309,15 +320,36 @@ class TeleopRunner:
                 float(np.clip(right_hand[0] / BRAINCO_CMD_MAX, 0.0, 1.0)),
             )
 
+    @staticmethod
+    def _sim_to_physical(sim_value: float) -> float:
+        """Map a sim-space Dex1 value to real motor radians."""
+        denom = DEX1_SIM_OPEN - DEX1_SIM_CLOSE
+        closed_ratio = 0.0 if abs(denom) < 1e-9 else (DEX1_SIM_OPEN - float(sim_value)) / denom
+        closed_ratio = float(np.clip(closed_ratio, 0.0, 1.0))
+        return DEX1_REAL_OPEN + (DEX1_REAL_CLOSE - DEX1_REAL_OPEN) * closed_ratio
+
+    def _gripper_cmd_for_record(self, left_gripper: np.ndarray, right_gripper: np.ndarray) -> np.ndarray:
+        """Recorder-facing gripper command: real motor radians for Dex1."""
+        if self.eef != "dex1":
+            return np.hstack([left_gripper, right_gripper])
+        if self.hand_ctrl is not None:
+            left, right = self.hand_ctrl.get_physical_hand_commands()
+            return np.array([left, left, right, right], dtype=float)
+        left = self._sim_to_physical(float(left_gripper[0]))
+        right = self._sim_to_physical(float(right_gripper[0]))
+        return np.array([left, left, right, right], dtype=float)
+
     def _get_hand_state(self) -> np.ndarray:
-        """Measured end-effector state, falling back to the last command."""
+        """Measured end-effector state in real Dex1 motor radians (DDS).
+
+        Falls back to converting the last sim-space command when Dex1 is disabled.
+        """
         if self.eef == "dex1" and self.hand_ctrl is not None:
-            try:
-                left_state, right_state = self.hand_ctrl.get_hand_states()
-            except Exception:
-                return self.gripper_cmd.copy()
-            left = self._dex1_ratio_to_sim(float(left_state[0]))
-            right = self._dex1_ratio_to_sim(float(right_state[0]))
+            left, right = self.hand_ctrl.get_physical_hand_states()
+            return np.array([left, left, right, right], dtype=float)
+        if self.eef == "dex1":
+            left = self._sim_to_physical(float(self.gripper_cmd[0]))
+            right = self._sim_to_physical(float(self.gripper_cmd[2]))
             return np.array([left, left, right, right], dtype=float)
         return self.gripper_cmd.copy()
 
@@ -359,11 +391,6 @@ class TeleopRunner:
         left_gripper, right_gripper = self._split_and_clip_hand_command(gripper)
         wrist = float(wrist)
 
-        with self.state_lock:
-            self.pt["arms"] = arms.copy()
-            self.pt["gripper"] = np.hstack([left_gripper, right_gripper])
-            self.pt["body"][0] = wrist
-
         if duration is not None:
             # Sending a distant target in one frame makes the arms lurch; ramp
             # there at the 100 Hz cadence the DDS bridge expects.
@@ -377,13 +404,17 @@ class TeleopRunner:
 
         self.arm_ctrl.ctrl_dual_arm(np.hstack([arms, wrist]))
         self._apply_hand_command(left_gripper, right_gripper)
+        with self.state_lock:
+            self.pt["arms"] = arms.copy()
+            self.pt["gripper"] = self._gripper_cmd_for_record(left_gripper, right_gripper)
+            self.pt["body"][0] = wrist
 
     def set_gripper_command(self, gripper):
         """Drive only the end effector, leaving the arm command untouched."""
         left_gripper, right_gripper = self._split_and_clip_hand_command(gripper)
-        with self.state_lock:
-            self.pt["gripper"] = np.hstack([left_gripper, right_gripper])
         self._apply_hand_command(left_gripper, right_gripper)
+        with self.state_lock:
+            self.pt["gripper"] = self._gripper_cmd_for_record(left_gripper, right_gripper)
 
     def _apply_hand_command(self, left_gripper: np.ndarray, right_gripper: np.ndarray):
         self.gripper_cmd = np.hstack([left_gripper, right_gripper])

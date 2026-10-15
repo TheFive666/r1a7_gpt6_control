@@ -156,6 +156,21 @@ class Dex1:
             right_state = [self._physical_to_normalized(self.dual_hand_state_array_out[1])]
         return left_state, right_state
 
+    def get_physical_hand_states(self):
+        """Return (left_q, right_q) motor positions in radians from DDS state."""
+        with self.dual_hand_data_lock:
+            return (
+                float(self.dual_hand_state_array_out[0]),
+                float(self.dual_hand_state_array_out[1]),
+            )
+
+    def get_physical_hand_commands(self):
+        """Return (left_q, right_q) commanded motor positions in radians."""
+        return (
+            float(self.l_cmd) * DEX1_MAX_RANGE,
+            float(self.r_cmd) * DEX1_MAX_RANGE,
+        )
+
     def get_hand_torques(self):
         """Return (l_tau, r_tau) in Nm."""
         with self.dual_hand_data_lock:
@@ -163,11 +178,13 @@ class Dex1:
                     self.dual_hand_state_array_out[3])
 
     def get_record_data(self):
-        left_state, right_state = self.get_hand_states()
+        left_q, right_q = self.get_physical_hand_states()
+        left_cmd, right_cmd = self.get_physical_hand_commands()
         l_tau, r_tau = self.get_hand_torques()
         return {
-            "hand_state": list(left_state) + list(right_state),
-            "hand_cmd": [self.l_cmd, self.r_cmd],
+            # Physical DDS motor q (rad), matching wbc_pico_record Dex1 recordings.
+            "hand_state": [left_q, right_q],
+            "hand_cmd": [left_cmd, right_cmd],
             "hand_torque": [l_tau, r_tau],
         }
 

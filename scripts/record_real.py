@@ -55,6 +55,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from robot.config import (
+    DEX1_REAL_CLOSE,
+    DEX1_REAL_OPEN,
     DEX1_SIM_CLOSE,
     DEX1_SIM_OPEN,
     LEFT_DEX1_JOINTS,
@@ -78,10 +80,25 @@ def draw_label(frame: np.ndarray, label: str) -> np.ndarray:
     return image
 
 
-def _dex1_ratio_to_sim(ratio: float) -> float:
-    """Map Dex1 0..1 open-normalized state to sim joint space."""
-    open_ratio = float(np.clip(ratio, 0.0, 1.0))
+def _dex1_physical_to_sim(physical: float) -> float:
+    """Map real Dex1 motor q (rad) into URDF/MuJoCo prismatic joint space."""
+    denom = DEX1_REAL_OPEN - DEX1_REAL_CLOSE
+    open_ratio = 0.0 if abs(denom) < 1e-9 else (float(physical) - DEX1_REAL_CLOSE) / denom
+    open_ratio = float(np.clip(open_ratio, 0.0, 1.0))
     return DEX1_SIM_CLOSE + open_ratio * (DEX1_SIM_OPEN - DEX1_SIM_CLOSE)
+
+
+def _dex1_sim_to_physical(sim_value: float) -> float:
+    """Map URDF/MuJoCo Dex1 joint value to real motor q (rad)."""
+    denom = DEX1_SIM_OPEN - DEX1_SIM_CLOSE
+    closed_ratio = 0.0 if abs(denom) < 1e-9 else (DEX1_SIM_OPEN - float(sim_value)) / denom
+    closed_ratio = float(np.clip(closed_ratio, 0.0, 1.0))
+    return DEX1_REAL_OPEN + (DEX1_REAL_CLOSE - DEX1_REAL_OPEN) * closed_ratio
+
+
+def _pad_dual_gripper(left: float, right: float) -> np.ndarray:
+    """Legacy 4-DoF layout: duplicate each physical finger for the coupled URDF joint."""
+    return np.array([left, left, right, right], dtype=float)
 
 
 class RealTeleopRecordBridge:
@@ -155,7 +172,8 @@ class RealTeleopRecordBridge:
             ]
         ).astype(float)
 
-    def _commanded_gripper(self) -> np.ndarray:
+    def _commanded_gripper_sim(self) -> np.ndarray:
+        """Local IK/URDF gripper command in MuJoCo joint space (fallback only)."""
         q = self.controller.q
         left = [
             float(q[self.controller.joint_indices[name]])
@@ -173,17 +191,36 @@ class RealTeleopRecordBridge:
             right.append(right[-1] if right else 0.0)
         return np.asarray(left[:2] + right[:2], dtype=float)
 
-    def _measured_gripper(self) -> np.ndarray:
+    def _commanded_gripper(self) -> np.ndarray:
+        """Gripper action in real Dex1 motor radians (from the DDS command path)."""
         hand = self.controller.hand_ctrl
         if hand is not None:
             try:
-                left_state, right_state = hand.get_hand_states()
-                left = _dex1_ratio_to_sim(float(left_state[0]))
-                right = _dex1_ratio_to_sim(float(right_state[0]))
-                return np.array([left, left, right, right], dtype=float)
+                left, right = hand.get_physical_hand_commands()
+                return _pad_dual_gripper(left, right)
             except Exception:
                 pass
-        return self._commanded_gripper()
+        sim = self._commanded_gripper_sim()
+        return _pad_dual_gripper(
+            _dex1_sim_to_physical(float(sim[0])),
+            _dex1_sim_to_physical(float(sim[2])),
+        )
+
+    def _measured_gripper(self) -> np.ndarray:
+        """Gripper state in real Dex1 motor radians from DDS ``rt/dex1/*/state``.
+
+        Never falls back to the local MuJoCo/URDF ``q`` while Dex1 is enabled:
+        that used to make ``hand_state`` track the sim command instead of hardware.
+        """
+        hand = self.controller.hand_ctrl
+        if hand is not None:
+            left, right = hand.get_physical_hand_states()
+            return _pad_dual_gripper(left, right)
+        sim = self._commanded_gripper_sim()
+        return _pad_dual_gripper(
+            _dex1_sim_to_physical(float(sim[0])),
+            _dex1_sim_to_physical(float(sim[2])),
+        )
 
     def _publish_pt(self) -> None:
         arms = self._commanded_arms()
@@ -479,6 +516,24 @@ class R1A7Record:
         result[: min(size, raw.size)] = raw[:size]
         return result
 
+    @staticmethod
+    def _hand_real_to_sim(hand_real: np.ndarray) -> np.ndarray:
+        """Keep ``robot_q_*`` gripper dims in URDF/MuJoCo space for LeRobot FK."""
+        hand_real = np.asarray(hand_real, dtype=float).reshape(-1)
+        if hand_real.size < 4:
+            padded = np.zeros(4, dtype=float)
+            padded[: hand_real.size] = hand_real
+            hand_real = padded
+        return np.array(
+            [
+                _dex1_physical_to_sim(float(hand_real[0])),
+                _dex1_physical_to_sim(float(hand_real[1])),
+                _dex1_physical_to_sim(float(hand_real[2])),
+                _dex1_physical_to_sim(float(hand_real[3])),
+            ],
+            dtype=float,
+        )
+
     def _state_action(self) -> tuple[dict, dict]:
         """Build the ``states`` / ``actions`` dicts written into each frame."""
         with self.runner.state_lock:
@@ -486,22 +541,25 @@ class R1A7Record:
             pt = {key: value.copy() for key, value in self.runner.pt.items()}
         state_body = self._array(pc, "body", 4)
         state_arms = self._array(pc, "arms", 14)
-        state_hand = self._array(pc, "gripper", 4)
+        # pc/pt gripper buffers are real Dex1 motor radians from DDS.
+        state_hand_real = self._array(pc, "gripper", 4)
+        action_hand_real = self._array(pt, "gripper", 4)
+        state_hand_sim = self._hand_real_to_sim(state_hand_real)
+        action_hand_sim = self._hand_real_to_sim(action_hand_real)
         action_body = self._array(pt, "body", 4)
         action_arms = self._array(pt, "arms", 14)
-        action_hand = self._array(pt, "gripper", 4)
         return (
             {
-                "robot_q_current": np.hstack((state_body, state_arms, state_hand)).tolist(),
+                "robot_q_current": np.hstack((state_body, state_arms, state_hand_sim)).tolist(),
                 "body": state_body.tolist(),
                 "arms": state_arms.tolist(),
-                "hand_state": state_hand.tolist(),
+                "hand_state": state_hand_real.tolist(),
             },
             {
-                "robot_q_desired": np.hstack((action_body, action_arms, action_hand)).tolist(),
+                "robot_q_desired": np.hstack((action_body, action_arms, action_hand_sim)).tolist(),
                 "body": action_body.tolist(),
                 "arms": action_arms.tolist(),
-                "hand_cmd": action_hand.tolist(),
+                "hand_cmd": action_hand_real.tolist(),
             },
         )
 
