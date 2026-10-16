@@ -106,8 +106,8 @@ python agent/scripts/r1a7_sdk.py --session agp/sessions/r1_trial status
 python agent/scripts/r1a7_sdk.py --session agp/sessions/r1_trial observe
 ```
 
-Python 中直接使用 `r1a7_sdk.ACTION_SCHEMA` 作为 Responses API 的严格 JSON
-schema。server 的启动方式仍见 `docs/replicate_guide.md`；SDK 不创建 publisher，
+Python 中直接使用 `r1a7_sdk.ACTION_SCHEMA` 作为结构化输出的严格 JSON
+schema。总体 rollout 入口和 Direct / SDK 路径区别见仓库根目录 `README.md`；SDK 不创建 publisher，
 也不负责切换机器人 FSM。
 
 推荐的完整 Astra 入口是：
